@@ -1,0 +1,22 @@
+# Render blueprint: one free web service. https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: countersign
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn countersign.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/audit/verify
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta/openai
+      - key: LLM_MODEL
+        value: gemini-flash-latest

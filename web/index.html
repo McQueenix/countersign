@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Countersign</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Crect width='44' height='44' rx='8' fill='%232343c4'/%3E%3Cpath d='M5 28c5-9 8-14 11-14s1 12 5 12 5-12 8-12 2 10 5 10 4-3 6-6' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Caveat:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="preview-banner" class="preview-banner" hidden>
+    Offline preview. PayPal and the AI model are replaced by stand-ins, so nothing here is a real sandbox transaction.
+  </div>
+
+  <header class="masthead">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 44 28" aria-hidden="true">
+        <path d="M2 20c5-9 9-14 12-14s1 12 5 12 6-12 9-12 2 10 6 10 5-4 8-7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M4 25h36" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity=".45"/>
+      </svg>
+      <div>
+        <h1>Countersign</h1>
+        <p id="tagline">No agent moves money on one signature.</p>
+      </div>
+    </div>
+    <ul class="status" aria-label="Connections">
+      <li id="st-paypal" class="pill" data-state="wait"><span class="dot"></span><span class="pill-text">PayPal sandbox</span></li>
+      <li id="st-llm" class="pill" data-state="wait"><span class="dot"></span><span class="pill-text">AI model</span></li>
+      <li><button id="st-chain" class="pill pill-button" data-state="wait" title="Recompute every hash in the audit log"><span class="dot"></span><span class="pill-text">Audit log</span></button></li>
+    </ul>
+  </header>
+
+  <details id="mandate-panel" class="mandate">
+    <summary>
+      <span class="mandate-title">Your mandate</span>
+      <span id="mandate-summary" class="mandate-summary"></span>
+      <span class="mandate-edit" aria-hidden="true">Change</span>
+    </summary>
+    <div class="mandate-body">
+      <div>
+        <p class="hint">Write the rules in your own words. AI turns them into limits, and from then on plain code enforces them. No model can loosen a limit.</p>
+        <textarea id="mandate-text" rows="8" spellcheck="true" aria-label="Mandate in plain English"></textarea>
+        <div class="row">
+          <button id="compile" class="button primary">Turn into rules</button>
+          <label class="switch" title="Pause to stop every payment at once">
+            <input type="checkbox" id="mandate-active">
+            <span id="mandate-active-label">In force</span>
+          </label>
+          <span id="compile-note" class="note" role="status"></span>
+        </div>
+      </div>
+      <div>
+        <p class="hint">The rules as enforced. Click a limit to change it yourself.</p>
+        <div id="rules-grid" class="rules-grid"></div>
+      </div>
+    </div>
+  </details>
+
+  <main class="desk">
+    <section class="column" aria-label="Work for the agent">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Agent's inbox</h2>
+          <button id="run-all" class="button">Hand all to the agent</button>
+        </div>
+        <ol id="inbox" class="inbox"></ol>
+        <form id="command-form" class="command">
+          <label for="command-text">Tell the agent what to do</label>
+          <div class="row">
+            <input id="command-text" type="text" placeholder="Pay Marco $120 for the caption fixes" autocomplete="off">
+            <button class="button" type="submit">Send</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section class="column wide" aria-labelledby="h-slips">
+      <div class="panel-head bare">
+        <h2 id="h-slips">Payment requests</h2>
+        <div class="row">
+          <button id="redteam" class="button danger-quiet" title="Sends what a compromised agent would send, straight to the guard">Simulate a hijacked agent</button>
+          <button id="reset" class="button quiet">Reset demo</button>
+        </div>
+      </div>
+      <div id="slips" class="slips" aria-live="polite"></div>
+      <div id="slips-empty" class="empty">
+        <p class="empty-title">Nothing has been requested yet.</p>
+        <p>Hand a work item to the agent. Each request it makes shows up here as a slip, and you can watch it collect its signatures.</p>
+      </div>
+    </section>
+
+    <section class="column" aria-labelledby="h-queue">
+      <div class="panel">
+        <div class="panel-head">
+          <h2 id="h-queue">Waiting for you</h2>
+          <span id="queue-count" class="count">0</span>
+        </div>
+        <div id="queue" class="queue"></div>
+        <p id="queue-empty" class="hint">Nothing needs your signature.</p>
+      </div>
+
+      <div class="panel">
+        <h2>This week</h2>
+        <div class="meter" role="img" aria-label="Weekly budget used">
+          <div id="meter-fill" class="meter-fill"></div>
+        </div>
+        <p id="meter-text" class="meter-text"></p>
+        <dl class="tally">
+          <div><dt>Sent through PayPal</dt><dd id="t-sent">0</dd></div>
+          <div><dt>Waiting</dt><dd id="t-waiting">0</dd></div>
+          <div><dt>Stopped</dt><dd id="t-stopped">0</dd></div>
+          <div><dt>Money kept from leaving</dt><dd id="t-saved">$0.00</dd></div>
+        </dl>
+      </div>
+    </section>
+  </main>
+
+  <section class="ledger" aria-labelledby="h-ledger">
+    <div class="panel-head bare">
+      <div>
+        <h2 id="h-ledger">Ledger</h2>
+        <p class="hint">Every request, who signed it, and what PayPal said. Click a row for the full trail.</p>
+      </div>
+      <div class="row">
+        <input id="ledger-search" type="search" placeholder="Search the ledger" aria-label="Search the ledger">
+        <button id="ledger-export" class="button">Download CSV</button>
+      </div>
+    </div>
+    <div id="ledger-grid" class="ledger-grid"></div>
+  </section>
+
+  <dialog id="detail" class="detail">
+    <form method="dialog"><button class="close" aria-label="Close">Close</button></form>
+    <div id="detail-body"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.3.0/dist/ag-grid-community.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
