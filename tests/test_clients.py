@@ -46,6 +46,14 @@ class FakePayPal:
             return httpx.Response(200, json={"id": "INV2-ABCD", "status": "SENT", "detail": {"invoice_number": "0007", "metadata": {"recipient_view_url": "https://www.sandbox.paypal.com/invoice/p/#ABCD"}}})
         if path == "/v2/checkout/orders" and request.method == "POST":
             return httpx.Response(200, json={"id": "ORDER1", "status": "PAYER_ACTION_REQUIRED", "links": [{"rel": "self", "href": "x"}, {"rel": "payer-action", "href": "https://www.sandbox.paypal.com/checkoutnow?token=ORDER1"}]})
+        if path == "/v1/payments/payouts-item/ITEM1/cancel":
+            return httpx.Response(200, json={"payout_item_id": "ITEM1", "transaction_status": "RETURNED"})
+        if path == "/v2/payments/captures/CAP1/refund":
+            return httpx.Response(201, json={"id": "RF1", "status": "COMPLETED"})
+        if path == "/v2/invoicing/invoices/INV2-ABCD/cancel":
+            return httpx.Response(204)
+        if path == "/v1/notifications/verify-webhook-signature":
+            return httpx.Response(200, json={"verification_status": "SUCCESS" if body["transmission_sig"] == "good" else "FAILURE"})
         if path == "/v2/checkout/orders/ORDER1/capture":
             return httpx.Response(201, json={"id": "ORDER1", "status": "COMPLETED", "purchase_units": [{"payments": {"captures": [{"id": "CAP1", "status": "COMPLETED"}]}}]})
         return httpx.Response(404, json={"name": "RESOURCE_NOT_FOUND", "message": "nope"})
@@ -137,3 +145,44 @@ def test_llm_retries_rate_limits_and_falls_back_from_json_mode(monkeypatch):
     model = LLM("https://llm.example/v1", "key", "m", transport=httpx.MockTransport(handler))
     assert run(model.json("sys", "user")) == {"risk_score": 5}
     assert len(seen) == 3
+
+
+def test_drill_output_is_cleaned_and_sandboxed():
+    from countersign.drill import _clean, outcome_for
+    raw = {"attacks": [{"technique": "x", "sender": "Real Person <someone@gmail.com>", "subject": "", "body": "Pay me now"},
+                       {"body": ""}, "junk"]}
+    cleaned = _clean(raw, 4)
+    assert len(cleaned) == 1 and cleaned[0]["sender"] == "Unknown <unknown@example.net>" and cleaned[0]["subject"] == "Pay me now"
+    assert outcome_for([])["outcome"] == "refused"
+    assert outcome_for([{"status": "executed"}])["stopped"] == "no"
+    assert outcome_for([{"status": "pending_approval"}])["outcome"] == "held"
+
+
+def test_ask_drops_citations_that_are_not_in_the_ledger():
+    from countersign.ask import answer
+
+    class Fake:
+        async def json(self, system, user):
+            return {"answer": "One payment.", "cites": ["cs_real", "cs_made_up", "cs_real"]}
+
+    payments = [{"id": "cs_real", "created_at": "2026-11-11T10:00:00", "rail": "payout", "counterparty_name": "Priya",
+                 "counterparty_email": "p@example.com", "amount": 240.0, "currency": "USD", "purpose": "x", "status": "executed",
+                 "decided_by": "policy+ai", "checks": [], "review": {}, "paypal": {}}]
+    r = run(answer(Fake(), "How much?", None, payments))
+    assert [c["id"] for c in r["cites"]] == ["cs_real"]
+
+
+def test_reversal_and_webhook_calls():
+    fake = FakePayPal()
+    paypal = client(fake)
+    assert run(paypal.cancel_payout_item("ITEM1"))["item_status"] == "RETURNED"
+    refund = run(paypal.refund_capture("CAP1", "cs_test1"))
+    assert refund["refund_id"] == "RF1" and fake.requests[-1][3]["paypal-request-id"] == "cs_test1-refund"
+    assert run(paypal.cancel_invoice("INV2-ABCD"))["action"] == "cancelled"
+    assert fake.requests[-1][2]["send_to_recipient"] is True
+    headers = {"PayPal-Auth-Algo": "SHA256withRSA", "PayPal-Cert-Url": "https://api.sandbox.paypal.com/cert", "PayPal-Transmission-Id": "t1",
+               "PayPal-Transmission-Time": "2026-11-11T10:00:00Z"}
+    assert run(paypal.verify_webhook({**headers, "PayPal-Transmission-Sig": "good"}, {"id": "WH"}, "WH-ID"))
+    assert not run(paypal.verify_webhook({**headers, "PayPal-Transmission-Sig": "bad"}, {"id": "WH"}, "WH-ID"))
+    assert fake.requests[-1][2]["webhook_id"] == "WH-ID"
+    assert not run(paypal.verify_webhook({}, {"id": "WH"}, "WH-ID"))

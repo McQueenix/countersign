@@ -40,6 +40,12 @@ def _link(body: dict[str, Any], *rels: str) -> str:
     return ""
 
 
+def _with_proof(text: str, payment: dict[str, Any]) -> str:
+    """Put the link to the signed proof inside the PayPal payment, where the recipient will see it."""
+    url = payment.get("verify_url")
+    return f"{text}\n\nAuthorised by Countersign. Verify: {url}" if url else text
+
+
 class PayPalClient:
     def __init__(
         self,
@@ -149,7 +155,7 @@ class PayPalClient:
                     "recipient_type": "EMAIL",
                     "receiver": payment["counterparty_email"],
                     "amount": {"value": money(payment["amount_cents"]), "currency": payment["currency"]},
-                    "note": payment["purpose"][:4000] or "Payment",
+                    "note": _with_proof(payment["purpose"][:3800] or "Payment", payment),
                     "sender_item_id": payment["id"],
                 }
             ],
@@ -203,7 +209,7 @@ class PayPalClient:
         detail: dict[str, Any] = {
             "currency_code": payment["currency"],
             "reference": payment["id"],
-            "note": (payment["purpose"] or "Thank you for your business.")[:4000],
+            "note": _with_proof((payment["purpose"] or "Thank you for your business.")[:3800], payment),
             "payment_term": {"term_type": "NET_10"},
         }
         if number:
@@ -279,6 +285,62 @@ class PayPalClient:
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
         return self._order_summary(await self._request("GET", f"/v2/checkout/orders/{order_id}"), order_id)
+
+    # ---- Balance -------------------------------------------------------------
+
+    async def get_balance(self, currency: str = "USD") -> int:
+        """Available balance in cents, from PayPal's reporting API."""
+        result = await self._request("GET", f"/v1/reporting/balances?currency_code={currency}")
+        for entry in result.get("balances") or []:
+            if entry.get("currency") == currency:
+                value = (entry.get("available_balance") or entry.get("total_balance") or {}).get("value", "0")
+                return int(round(float(value) * 100))
+        raise PayPalError(0, "NO_BALANCE", f"PayPal returned no {currency} balance.")
+
+    # ---- Reversals: the owner takes a payment back --------------------------
+
+    async def cancel_payout_item(self, item_id: str) -> dict[str, Any]:
+        """Recall a payout. PayPal only allows this while the recipient has not claimed it yet."""
+        result = await self._request("POST", f"/v1/payments/payouts-item/{item_id}/cancel")
+        return {"api": "Payouts", "action": "recalled", "item_status": result.get("transaction_status", "")}
+
+    async def refund_capture(self, capture_id: str, request_id: str) -> dict[str, Any]:
+        result = await self._request("POST", f"/v2/payments/captures/{capture_id}/refund", json={}, request_id=request_id + "-refund")
+        return {"api": "Payments", "action": "refunded", "refund_id": result.get("id", ""), "refund_status": result.get("status", "")}
+
+    async def cancel_invoice(self, invoice_id: str) -> dict[str, Any]:
+        await self._request(
+            "POST", f"/v2/invoicing/invoices/{invoice_id}/cancel",
+            json={"send_to_recipient": True, "send_to_invoicer": False, "note": "Cancelled by the business owner."},
+        )
+        return {"api": "Invoicing", "action": "cancelled"}
+
+    async def remind_invoice(self, invoice_id: str, note: str) -> dict[str, Any]:
+        await self._request(
+            "POST", f"/v2/invoicing/invoices/{invoice_id}/remind",
+            json={"subject": f"Reminder: invoice from {self.brand_name}", "note": note[:4000],
+                  "send_to_invoicer": False, "send_to_recipient": True},
+        )
+        return {"api": "Invoicing", "action": "reminded"}
+
+    # ---- Webhooks: PayPal tells us what happened next ------------------------
+
+    async def verify_webhook(self, headers: dict[str, str], event: dict[str, Any], webhook_id: str) -> bool:
+        """Ask PayPal whether this webhook really came from PayPal (signature check on PayPal's side)."""
+        h = {key.lower(): value for key, value in headers.items()}
+        body = {
+            "auth_algo": h.get("paypal-auth-algo", ""),
+            "cert_url": h.get("paypal-cert-url", ""),
+            "transmission_id": h.get("paypal-transmission-id", ""),
+            "transmission_sig": h.get("paypal-transmission-sig", ""),
+            "transmission_time": h.get("paypal-transmission-time", ""),
+            "webhook_id": webhook_id,
+            "webhook_event": event,
+        }
+        if not all(body[k] for k in ("auth_algo", "cert_url", "transmission_id", "transmission_sig", "transmission_time")):
+            return False
+        result = await self._request("POST", "/v1/notifications/verify-webhook-signature", json=body)
+        return result.get("verification_status") == "SUCCESS"
 
     @staticmethod
     def _order_summary(result: dict[str, Any], order_id: str) -> dict[str, Any]:

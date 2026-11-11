@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+ROOT = Path(__file__).resolve().parent.parent
+# .env is the documented name. Windows often saves it as ".env.txt" without showing the extension,
+# so those names are accepted too, in the project folder or the folder the server was started from.
+ENV_CANDIDATES = [base / name for base in (ROOT, Path.cwd()) for name in (".env", ".env.txt", "env.txt")]
+ENV_FILE = next((path for path in ENV_CANDIDATES if path.is_file()), None)
+if ENV_FILE:
+    load_dotenv(ENV_FILE)
 
 # Countersign is a prototype and is hard-wired to the PayPal sandbox.
 # There is deliberately no switch to point it at live money.
@@ -23,6 +30,7 @@ class Settings:
     paypal_client_id: str
     paypal_client_secret: str
     paypal_base: str
+    paypal_webhook_id: str
     llm_base_url: str
     llm_api_key: str
     llm_model: str
@@ -49,6 +57,7 @@ def load_settings() -> Settings:
         paypal_client_id=os.getenv("PAYPAL_CLIENT_ID", "").strip(),
         paypal_client_secret=os.getenv("PAYPAL_CLIENT_SECRET", "").strip(),
         paypal_base=PAYPAL_SANDBOX_BASE,
+        paypal_webhook_id=os.getenv("PAYPAL_WEBHOOK_ID", "").strip(),
         llm_base_url=os.getenv(
             "LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
         ).strip().rstrip("/"),

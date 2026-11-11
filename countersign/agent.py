@@ -18,6 +18,7 @@ from .models import PaymentIntent
 from .store import Store
 
 MAX_TURNS = 5
+CATEGORIES = ["Contractors", "Client billing", "Stock and software", "Marketing", "Travel", "Refunds", "Other"]
 
 
 def _money_tool(name: str, description: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -28,6 +29,7 @@ def _money_tool(name: str, description: str, extra: dict[str, Any] | None = None
         "currency": {"type": "string", "description": "3-letter currency code, for example USD."},
         "purpose": {"type": "string", "description": "Short description of what the payment is for."},
         "justification": {"type": "string", "description": "Why this is owed, citing the work item."},
+        "category": {"type": "string", "enum": CATEGORIES, "description": "Bookkeeping category for the owner's accountant."},
     }
     properties.update(extra or {})
     return {
@@ -105,6 +107,8 @@ def describe_result(payment: dict[str, Any]) -> str:
     paypal = payment.get("paypal") or {}
     if status == "executed":
         return f"APPROVED and sent to PayPal ({paypal.get('api', 'PayPal')} id {paypal.get('id', '')}). {amount} to {payment['counterparty_email']}."
+    if status == "scheduled":
+        return f"APPROVED. It goes to PayPal in a few seconds unless the owner presses Undo. {amount} to {payment['counterparty_email']}."
     if status == "awaiting_payer":
         return f"APPROVED. A PayPal order was created ({paypal.get('id', '')}) and is waiting for the owner to approve it inside PayPal."
     if status == "pending_approval":

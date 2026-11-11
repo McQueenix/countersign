@@ -31,7 +31,18 @@ Today's date is {today}. Reply with one JSON object and nothing else, using exac
   "allowed_payees": [emails],        // people it may pay
   "blocked_payees": [emails],        // people it must never pay
   "unknown_payee": "escalate" | "deny",  // someone not on the list: ask the owner, or refuse
-  "expires_on": "YYYY-MM-DD" or null
+  "expires_on": "YYYY-MM-DD" or null,
+  "undo_seconds": integer,           // seconds to wait, with an undo button, before an automatic payment is sent
+  "unusual_factor": number,          // hold a payment this many times above what the payee is usually paid
+  "max_per_hour": integer or null,   // most payment requests in one hour
+  "active_hours": "HH:MM-HH:MM" or null,  // only pay inside these hours
+  "timezone": string,                // IANA time zone for active_hours, for example "Asia/Kolkata"
+  "quarantine_after": integer,       // freeze the agent after this many blocked requests in ten minutes
+  "allowed_domains": [domains],      // companies whose whole domain is approved, for example "lumenstock.com"
+  "category_budgets": {{category: number}},  // weekly limits per spending category, for example {{"Marketing": 300}}
+  "new_payee_cap": number or null,   // most for the first payment to someone never paid before
+  "dual_control_over": number or null,  // above this two different people must sign
+  "hold_expires_hours": number or null  // refuse a payment nobody signs within this many hours
 }}
 
 Rules:
@@ -39,7 +50,10 @@ Rules:
 - If no approval threshold is given, set auto_approve_limit equal to per_payment_cap.
 - If no per-payment cap is given, use the approval threshold; if neither is given, use 0.
 - Only include email addresses that appear in the owner's text.
-- Never invent limits that are looser than what the owner wrote."""
+- Never invent limits that are looser than what the owner wrote.
+- Leave out undo_seconds, unusual_factor, max_per_hour, active_hours, timezone, quarantine_after, allowed_domains,
+  category_budgets, new_payee_cap, dual_control_over and hold_expires_hours unless the owner mentions them.
+- Category names must be one of: Contractors, Client billing, Stock and software, Marketing, Travel, Refunds, Other."""
 
 
 async def compile_mandate(llm: LLM, text: str) -> Mandate:
@@ -50,6 +64,7 @@ async def compile_mandate(llm: LLM, text: str) -> Mandate:
     raw = {key: value for key, value in raw.items() if key in Mandate.model_fields}
     raw["text"] = text
     raw["active"] = True
+    raw.pop("paused_reason", None)
     try:
         mandate = Mandate.model_validate(raw)
     except ValidationError as exc:

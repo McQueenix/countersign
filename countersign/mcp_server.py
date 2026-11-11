@@ -23,13 +23,15 @@ except ImportError:  # mcp 1.x
 
 BASE_URL = os.getenv("COUNTERSIGN_URL", "http://localhost:8000").rstrip("/")
 AGENT_NAME = os.getenv("COUNTERSIGN_AGENT_NAME", "MCP agent")
+AGENT_KEY = os.getenv("COUNTERSIGN_AGENT_KEY", "")  # issued in the console under Agents
 
 mcp = MCPServer("countersign")
 
 
 async def _call(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    headers = {"X-Countersign-Key": AGENT_KEY} if AGENT_KEY else {}
     async with httpx.AsyncClient(timeout=120) as http:
-        response = await http.request(method, f"{BASE_URL}{path}", json=body)
+        response = await http.request(method, f"{BASE_URL}{path}", json=body, headers=headers)
     if response.status_code >= 400:
         try:
             detail = response.json().get("detail")

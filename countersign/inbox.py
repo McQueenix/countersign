@@ -15,7 +15,8 @@ def default_mandate(settings: Settings) -> Mandate:
         f"{settings.contractor2_email}, up to $500 per payment and $1,500 per week. "
         "Anything over $250 needs my approval. If someone is not on the approved list, ask me first. "
         "It may send invoices to clients up to $5,000. It may buy stock assets and software from vendors, "
-        "but I approve every purchase myself. This mandate ends on 31 December 2027."
+        "but I approve every purchase myself. Give me 10 seconds to undo anything it sends on its own. "
+        "This mandate ends on 31 December 2027."
     )
     return Mandate(
         agent_name="Ops Agent",
@@ -34,6 +35,7 @@ def default_mandate(settings: Settings) -> Mandate:
         blocked_payees=[],
         unknown_payee="escalate",
         expires_on="2027-12-31",
+        undo_seconds=10,
     )
 
 

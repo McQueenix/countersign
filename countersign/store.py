@@ -16,7 +16,7 @@ GENESIS = "0" * 64
 
 # Money that is spent or reserved. Counted against budgets so a queue of
 # pending approvals cannot be used to overshoot a limit.
-COMMITTED = ("reviewing", "pending_approval", "executing", "awaiting_payer", "executed")
+COMMITTED = ("reviewing", "pending_approval", "scheduled", "executing", "awaiting_payer", "awaiting_client", "executed")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mandate (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -41,7 +41,10 @@ CREATE TABLE IF NOT EXISTS payments (
     review TEXT NOT NULL,
     paypal TEXT NOT NULL,
     decided_by TEXT NOT NULL,
-    note TEXT NOT NULL
+    note TEXT NOT NULL,
+    mandate_hash TEXT NOT NULL DEFAULT '',
+    signers TEXT NOT NULL DEFAULT '[]',
+    category TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS audit (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +55,14 @@ CREATE TABLE IF NOT EXISTS audit (
     data TEXT NOT NULL,
     prev_hash TEXT NOT NULL,
     hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS proofs (
+    payment_id TEXT PRIMARY KEY,
+    issued_at TEXT NOT NULL,
+    data TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    key_id TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id TEXT PRIMARY KEY,
@@ -65,7 +76,7 @@ CREATE TABLE IF NOT EXISTS inbox (
 );
 """
 
-JSON_FIELDS = ("items", "checks", "review", "paypal")
+JSON_FIELDS = ("items", "checks", "review", "paypal", "signers")
 
 
 def now_iso() -> str:
@@ -88,6 +99,11 @@ class Store:
         self._lock = threading.RLock()
         with self._lock:
             self._db.executescript(SCHEMA)
+            columns = {row["name"] for row in self._db.execute("PRAGMA table_info(payments)")}
+            for name, kind in (("mandate_hash", "TEXT NOT NULL DEFAULT ''"), ("signers", "TEXT NOT NULL DEFAULT '[]'"),
+                               ("category", "TEXT NOT NULL DEFAULT ''")):
+                if name not in columns:  # databases created by earlier versions
+                    self._db.execute(f"ALTER TABLE payments ADD COLUMN {name} {kind}")
             self._db.commit()
 
     # ---- mandate -----------------------------------------------------------
@@ -105,8 +121,59 @@ class Store:
                 (mandate.model_dump_json(), now_iso()),
             )
             self._db.commit()
-        self.audit("mandate_updated", actor, mandate.model_dump(mode="json"))
+        data = mandate.model_dump(mode="json")
+        self.audit("mandate_updated", actor, data)
+        self._remember_version(data, actor)
         return mandate
+
+    def _remember_version(self, data: dict[str, Any], actor: str) -> None:
+        """Keep every version of the mandate, so a proof's mandate_sha256 can be traced to the exact rules."""
+        sha = hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+        history = json.loads(self.get_kv("mandate_history") or "[]")
+        if history and history[-1]["sha256"] == sha:
+            return
+        history.append({"sha256": sha, "saved_at": now_iso(), "by": actor, "mandate": data})
+        self.set_kv("mandate_history", json.dumps(history[-40:]))
+
+    def payee_confirmations(self) -> dict[str, str]:
+        return json.loads(self.get_kv("payee_confirmations") or "{}")
+
+    def confirm_payee(self, email: str) -> str:
+        confirmations = self.payee_confirmations()
+        confirmations[email] = now_iso()
+        self.set_kv("payee_confirmations", json.dumps(confirmations))
+        return confirmations[email]
+
+    def mandate_history(self) -> list[dict[str, Any]]:
+        return list(reversed(json.loads(self.get_kv("mandate_history") or "[]")))
+
+    def known_payees(self) -> list[dict[str, str]]:
+        """Everyone this business has actually paid, with the name they were paid under."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT counterparty_email AS email, MAX(counterparty_name) AS name FROM payments "
+                "WHERE status = 'executed' GROUP BY counterparty_email"
+            ).fetchall()
+        return [{"email": r["email"], "name": r["name"] or ""} for r in rows]
+
+    def committed_by_category(self, category: str, since: datetime) -> int:
+        marks = ", ".join("?" * len(COMMITTED))
+        rails = ", ".join("?" * len(MONEY_OUT_RAILS))
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT COALESCE(SUM(amount_cents), 0) AS total FROM payments "
+                f"WHERE category = ? AND status IN ({marks}) AND rail IN ({rails}) AND created_at >= ?",
+                [category, *COMMITTED, *MONEY_OUT_RAILS, since.isoformat(timespec="milliseconds")],
+            ).fetchone()
+        return int(row["total"])
+
+    def stale_holds(self, before: datetime) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM payments WHERE status = 'pending_approval' AND created_at < ?",
+                (before.isoformat(timespec="milliseconds"),),
+            ).fetchall()
+        return [self._payment(row) for row in rows]
 
     # ---- payments ----------------------------------------------------------
 
@@ -124,12 +191,12 @@ class Store:
         columns = (
             "id created_at updated_at actor rail counterparty_email counterparty_name amount_cents "
             "currency purpose justification source_ref evidence items status decision checks review "
-            "paypal decided_by note"
+            "paypal decided_by note mandate_hash signers category"
         ).split()
         with self._lock:
             self._db.execute(
                 f"INSERT INTO payments ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
-                [row.get(column) for column in columns],
+                [row.get(column) if column not in ("mandate_hash", "category") else row.get(column) or "" for column in columns],
             )
             self._db.commit()
         return self.get_payment(record["id"])  # type: ignore[return-value]
@@ -179,6 +246,71 @@ class Store:
                 [rail, email, cents, *COMMITTED, since],
             ).fetchall()
         return [self._payment(row) for row in rows]
+
+    def recent_blocks(self, since: datetime) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM payments WHERE status = 'blocked' AND created_at >= ? ORDER BY created_at DESC",
+                (since.isoformat(timespec="milliseconds"),),
+            ).fetchall()
+        return [self._payment(row) for row in rows]
+
+    def payee_committed(self, email: str, since: datetime) -> tuple[int, int]:
+        """Money out to one payee that is spent or reserved since a time: (total cents, number of payments)."""
+        marks = ", ".join("?" * len(COMMITTED))
+        rails = ", ".join("?" * len(MONEY_OUT_RAILS))
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT COALESCE(SUM(amount_cents), 0) AS total, COUNT(*) AS n FROM payments "
+                f"WHERE counterparty_email = ? AND status IN ({marks}) AND rail IN ({rails}) AND created_at >= ?",
+                [email, *COMMITTED, *MONEY_OUT_RAILS, since.isoformat(timespec="milliseconds")],
+            ).fetchone()
+        return int(row["total"]), int(row["n"])
+
+    def payee_paid_amounts(self, email: str) -> list[int]:
+        rails = ", ".join("?" * len(MONEY_OUT_RAILS))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT amount_cents FROM payments WHERE counterparty_email = ? AND status = 'executed' AND rail IN ({rails})",
+                [email, *MONEY_OUT_RAILS],
+            ).fetchall()
+        return [int(row["amount_cents"]) for row in rows]
+
+    def committed_by_actor(self, actor: str, since: datetime) -> int:
+        marks = ", ".join("?" * len(COMMITTED))
+        rails = ", ".join("?" * len(MONEY_OUT_RAILS))
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT COALESCE(SUM(amount_cents), 0) AS total FROM payments "
+                f"WHERE actor = ? AND status IN ({marks}) AND rail IN ({rails}) AND created_at >= ?",
+                [actor, *COMMITTED, *MONEY_OUT_RAILS, since.isoformat(timespec="milliseconds")],
+            ).fetchone()
+        return int(row["total"])
+
+    def count_requests(self, since: datetime) -> int:
+        rails = ", ".join("?" * len(MONEY_OUT_RAILS))
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT COUNT(*) AS n FROM payments WHERE rail IN ({rails}) AND created_at >= ?",
+                [*MONEY_OUT_RAILS, since.isoformat(timespec="milliseconds")],
+            ).fetchone()
+        return int(row["n"])
+
+    def payee_summary(self, email: str) -> dict[str, Any]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT status, amount_cents, created_at FROM payments WHERE counterparty_email = ? ORDER BY created_at ASC", (email,)
+            ).fetchall()
+        paid = sorted(int(r["amount_cents"]) for r in rows if r["status"] == "executed")
+        usual = paid[len(paid) // 2] if paid else 0
+        return {
+            "requests": len(rows),
+            "paid_count": len(paid),
+            "paid_total": sum(paid) / 100,
+            "usual": usual / 100,
+            "stopped": sum(1 for r in rows if r["status"] in ("blocked", "rejected")),
+            "first_seen": rows[0]["created_at"] if rows else None,
+        }
 
     def payee_history(self, email: str) -> int:
         with self._lock:
@@ -232,6 +364,31 @@ class Store:
                 return {"ok": False, "count": len(rows), "broken_at": row["seq"]}
             prev_hash = row["hash"]
         return {"ok": True, "count": len(rows), "head": prev_hash}
+
+    # ---- signing key and proofs ---------------------------------------------
+
+    def get_kv(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_kv(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, value))
+            self._db.commit()
+
+    def save_proof(self, payment_id: str, data: dict[str, Any], signature: str, key_id: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO proofs (payment_id, issued_at, data, signature, key_id) VALUES (?, ?, ?, ?, ?)",
+                (payment_id, data.get("issued_at", now_iso()), json.dumps(data, sort_keys=True), signature, key_id),
+            )
+            self._db.commit()
+
+    def get_proof(self, payment_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM proofs WHERE payment_id = ?", (payment_id,)).fetchone()
+        return {**dict(row), "data": json.loads(row["data"])} if row else None
 
     # ---- inbox -------------------------------------------------------------
 
@@ -291,5 +448,8 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM payments")
             self._db.execute("DELETE FROM audit")
+            self._db.execute("DELETE FROM proofs")
+            self._db.execute("DELETE FROM kv WHERE key LIKE 'approval:%' OR key LIKE 'confirm:%'")
+            self._db.execute("DELETE FROM kv WHERE key IN ('standing_orders', 'agents', 'mandate_history', 'payee_confirmations', 'plans', 'owner_knowledge')")
             self._db.commit()
         self.audit("ledger_reset", "owner", {"reason": "demo data cleared"})

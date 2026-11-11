@@ -22,7 +22,9 @@ def settings():
 @pytest.fixture
 def store(tmp_path, settings):
     store = Store(str(tmp_path / "test.db"))
-    store.save_mandate(default_mandate(settings), actor="system")
+    mandate = default_mandate(settings)
+    mandate.undo_seconds = 0
+    store.save_mandate(mandate, actor="system")
     store.replace_inbox(seed_items(settings))
     return store
 
