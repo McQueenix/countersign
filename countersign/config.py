@@ -34,6 +34,7 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    llm_reasoning_effort: str
     db_path: str
     public_base_url: str
     business_name: str
@@ -63,6 +64,7 @@ def load_settings() -> Settings:
         ).strip().rstrip("/"),
         llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
         llm_model=os.getenv("LLM_MODEL", "gemini-flash-latest").strip(),
+        llm_reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "").strip(),
         db_path=os.getenv("COUNTERSIGN_DB", "countersign.db").strip(),
         public_base_url=(os.getenv("PUBLIC_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:8000").strip().rstrip("/"),
         business_name=os.getenv("BUSINESS_NAME", "Kestrel Studio").strip(),

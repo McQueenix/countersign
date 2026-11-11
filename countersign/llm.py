@@ -70,13 +70,19 @@ class LLM:
         base_url: str,
         api_key: str,
         model: str,
-        timeout: float = 60.0,
+        timeout: float = 120.0,
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self._http = httpx.AsyncClient(timeout=timeout, transport=transport)
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0), transport=transport)
+        # Thinking models are slow on every call. Countersign's prompts are short and structured, so it asks for
+        # little thinking where the endpoint supports it, and stops asking the first time an endpoint refuses it.
+        if reasoning_effort is None and "generativelanguage.googleapis.com" in self.base_url:
+            reasoning_effort = "low"
+        self.reasoning_effort = (reasoning_effort or "").strip().lower() or None
 
     @property
     def configured(self) -> bool:
@@ -88,8 +94,11 @@ class LLM:
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.configured:
             raise LLMError("No AI model is configured. Set LLM_API_KEY and LLM_MODEL in .env.")
+        if self.reasoning_effort and "reasoning_effort" not in payload:
+            payload = {**payload, "reasoning_effort": self.reasoning_effort}
         response = None
-        # Free tiers rate-limit hard. Wait and retry rather than fail a payment review.
+        timeouts = 0
+        # Free tiers rate-limit hard and sometimes stall. Wait and retry rather than fail a payment review.
         for wait in (*RETRY_WAITS, None):
             try:
                 response = await self._http.post(
@@ -97,8 +106,17 @@ class LLM:
                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                     json=payload,
                 )
+            except httpx.TimeoutException as exc:
+                timeouts += 1
+                if timeouts < 2:
+                    continue
+                raise LLMError(f"Could not reach the AI model: {exc.__class__.__name__}") from exc
             except httpx.HTTPError as exc:
                 raise LLMError(f"Could not reach the AI model: {exc.__class__.__name__}") from exc
+            if response.status_code == 400 and "reasoning_effort" in payload and "reasoning" in response.text.lower():
+                self.reasoning_effort = None
+                payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
+                continue
             if response.status_code not in (429, 500, 502, 503, 529) or wait is None:
                 break
             try:

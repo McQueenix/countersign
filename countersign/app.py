@@ -117,7 +117,8 @@ def create_app(
         paypal = paypal or PreviewPayPal()
         llm = llm or PreviewLLM()
     paypal = paypal or PayPalClient(settings.paypal_base, settings.paypal_client_id, settings.paypal_client_secret, settings.business_name)
-    llm = llm or LLM(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
+    llm = llm or LLM(settings.llm_base_url, settings.llm_api_key, settings.llm_model,
+                     reasoning_effort=settings.llm_reasoning_effort or None)
 
     notary = Notary(store, settings.business_name)
     guard = Guard(store, paypal, llm, bus, settings.public_base_url, notary)
