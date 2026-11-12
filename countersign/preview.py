@@ -157,10 +157,10 @@ class PreviewLLM:
         if "explain a payment plan" in system:
             plan = json.loads(user.split("PLAN", 1)[-1])
             paid = ", ".join(f"{r['who']} ({r['amount']:,.2f})" for r in plan["pay_today"]) or "nothing"
-            waits = ", ".join(r["who"] for r in plan["wait"]) or "nothing"
+            waits = ", ".join(r["who"] for r in plan["wait"])
             after = plan["cash_after_plan_once_clients_pay"]
             note = "" if plan["cash_before_clients_pay"] >= plan["buffer"] else f" Until clients pay you would have {plan['cash_before_clients_pay']:,.2f}, below your buffer."
-            return {"summary": f"Pay {paid} today. {waits} can wait. Once expected client payments arrive you keep {after:,.2f}, above your {plan['buffer']:,.2f} buffer.{note} (Offline preview: a real model explains this more naturally.)",
+            return {"summary": f"Pay {paid} today. {(waits + ' can wait. ') if waits else 'Nothing needs to wait. '}Once expected client payments arrive you keep {after:,.2f}, above your {plan['buffer']:,.2f} buffer.{note} (Offline preview: a real model explains this more naturally.)",
                     "cites": [r["id"] for r in plan["pay_today"]]}
         if "summary chunk of a business policy" in system:
             return {"overview": "", "sections": []}

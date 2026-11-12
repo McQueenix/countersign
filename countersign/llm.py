@@ -76,13 +76,22 @@ class LLM:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.model = model
+        # LLM_MODEL may list several models, fastest first: "gemini-flash-lite-latest,gemini-flash-latest".
+        # If one is unknown to the endpoint or keeps stalling, the next one is used.
+        self.models = [m.strip() for m in (model or "").split(",") if m.strip()]
+        self.model = self.models[0] if self.models else ""
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0), transport=transport)
         # Thinking models are slow on every call. Countersign's prompts are short and structured, so it asks for
         # little thinking where the endpoint supports it, and stops asking the first time an endpoint refuses it.
         if reasoning_effort is None and "generativelanguage.googleapis.com" in self.base_url:
             reasoning_effort = "low"
         self.reasoning_effort = (reasoning_effort or "").strip().lower() or None
+
+    def _next_model(self) -> bool:
+        if self.model in self.models and self.models.index(self.model) + 1 < len(self.models):
+            self.model = self.models[self.models.index(self.model) + 1]
+            return True
+        return False
 
     @property
     def configured(self) -> bool:
@@ -110,9 +119,17 @@ class LLM:
                 timeouts += 1
                 if timeouts < 2:
                     continue
+                if self._next_model():
+                    payload = {**payload, "model": self.model}
+                    timeouts = 0
+                    continue
                 raise LLMError(f"Could not reach the AI model: {exc.__class__.__name__}") from exc
             except httpx.HTTPError as exc:
                 raise LLMError(f"Could not reach the AI model: {exc.__class__.__name__}") from exc
+            if response.status_code in (400, 404) and "model" in response.text.lower() and \
+                    ("not found" in response.text.lower() or "not supported" in response.text.lower()) and self._next_model():
+                payload = {**payload, "model": self.model}
+                continue
             if response.status_code == 400 and "reasoning_effort" in payload and "reasoning" in response.text.lower():
                 self.reasoning_effort = None
                 payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
